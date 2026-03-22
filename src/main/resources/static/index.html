@@ -1,50 +1,207 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>WebSocket Chat</title>
+    <meta charset="UTF-8">
+    <title>Simple WebRTC Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        video {
+            width: 320px;
+            height: 240px;
+            background: black;
+            margin-right: 10px;
+        }
+
+        .row {
+            margin-bottom: 12px;
+        }
+    </style>
 </head>
 <body>
+<h2>Simple WebRTC Demo</h2>
 
-<h2>WebSocket Chat</h2>
+<div class="row">
+    <input id="username" placeholder="Your name">
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+</div>
 
-<input id="username" placeholder="Your name">
-<button onclick="connect()">Connect</button>
+<div class="row">
+    <input id="callTo" placeholder="Call to user">
+    <button onclick="startCamera()">Start camera</button>
+    <button onclick="callUser()">Call</button>
+</div>
 
-<br><br>
-
-<input id="to" placeholder="Send to">
-<input id="message" placeholder="Message">
-<button onclick="sendMessage()">Send</button>
-
-<ul id="messages"></ul>
+<div class="row">
+    <video id="localVideo" autoplay playsinline muted></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+</div>
 
 <script>
     let socket;
+    let localStream;
+    let peerConnection;
+    let currentUser;
+
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+
+    const rtcConfig = {
+        iceServers: [
+            { urls: "stun:stun.l.google.com:19302" }
+        ]
+    };
 
     function connect() {
-        const username = document.getElementById("username").value;
-        socket = new WebSocket("ws://localhost:8080/ws?user=" + username);
+        currentUser = document.getElementById("username").value;
 
-        socket.onmessage = (event) => {
+        socket = new WebSocket("ws://localhost:8080/ws?user=" + currentUser);
+
+        socket.onopen = () => {
+            console.log("WebSocket connected");
+        };
+
+        socket.onmessage = async (event) => {
             const data = JSON.parse(event.data);
-            const li = document.createElement("li");
-            li.innerText = data.from + ": " + data.message;
-            document.getElementById("messages").appendChild(li);
+            console.log("Received:", data);
+
+            if (data.type === "offer") {
+                await handleOffer(data);
+            } else if (data.type === "answer") {
+                await handleAnswer(data);
+            } else if (data.type === "iceCandidate") {
+                await handleRemoteIceCandidate(data);
+            }
+        };
+
+        socket.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+
+        socket.onclose = () => {
+            console.log("WebSocket closed");
         };
     }
 
-    function sendMessage() {
-        const to = document.getElementById("to").value;
-        const message = document.getElementById("message").value;
-        const username = document.getElementById("username").value;
+    function disconnect() {
+        console.log("Disconnecting...");
+
+        // 1. Закрываем WebRTC соединение
+        if (peerConnection) {
+            peerConnection.close();
+            peerConnection = null;
+        }
+
+        // 2. Останавливаем камеру и микрофон
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+
+        // 3. Очищаем видео
+        localVideo.srcObject = null;
+        remoteVideo.srcObject = null;
+
+        // 4. Закрываем WebSocket
+        if (socket) {
+            socket.close();
+            socket = null;
+        }
+
+        console.log("Disconnected");
+    }
+
+    async function startCamera() {
+        localStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true
+        });
+
+        localVideo.srcObject = localStream;
+        console.log("Camera started");
+    }
+
+    function createPeerConnection(targetUser) {
+        peerConnection = new RTCPeerConnection(rtcConfig);
+
+        localStream.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream);
+        });
+
+        peerConnection.ontrack = (event) => {
+            console.log("Remote track received");
+            remoteVideo.srcObject = event.streams[0];
+        };
+
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.send(JSON.stringify({
+                    type: "iceCandidate",
+                    from: currentUser,
+                    to: targetUser,
+                    candidate: event.candidate
+                }));
+            }
+        };
+
+        peerConnection.onconnectionstatechange = () => {
+            console.log("Connection state:", peerConnection.connectionState);
+        };
+    }
+
+    async function callUser() {
+        const targetUser = document.getElementById("callTo").value;
+
+        createPeerConnection(targetUser);
+
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
 
         socket.send(JSON.stringify({
-            from: username,
-            to: to,
-            message: message
+            type: "offer",
+            from: currentUser,
+            to: targetUser,
+            offer: offer
         }));
+
+        console.log("Offer sent");
+    }
+
+    async function handleOffer(data) {
+        const fromUser = data.from;
+
+        createPeerConnection(fromUser);
+
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+
+        socket.send(JSON.stringify({
+            type: "answer",
+            from: currentUser,
+            to: fromUser,
+            answer: answer
+        }));
+
+        console.log("Answer sent");
+    }
+
+    async function handleAnswer(data) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+        console.log("Answer applied");
+    }
+
+    async function handleRemoteIceCandidate(data) {
+        if (peerConnection) {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            console.log("ICE candidate added");
+        }
     }
 </script>
-
 </body>
 </html>
